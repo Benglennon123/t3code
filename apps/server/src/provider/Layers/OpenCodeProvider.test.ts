@@ -157,6 +157,49 @@ it.effect("keeps Go entitlement absence distinct from failed or malformed usage 
   }),
 );
 
+it.effect("surfaces the provider's rejection reason for a rejected Go key", () =>
+  Effect.gen(function* () {
+    const limits = yield* readOpenCodeGoUsageLimits({
+      enabled: true,
+      serverUrl: "",
+      environment: {
+        OPENCODE_AUTH_CONTENT: '{"opencode-go":{"type":"api","key":"expired-key"}}',
+      },
+    }).pipe(
+      Effect.provideService(
+        FileSystem.FileSystem,
+        FileSystem.makeNoop({
+          readFileString: () => Effect.die("inline credentials must bypass disk"),
+        }),
+      ),
+      Effect.provideService(
+        HttpClient.HttpClient,
+        HttpClient.make((request) =>
+          Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              Response.json(
+                {
+                  error: {
+                    type: "authentication_error",
+                    code: "api_key_expired",
+                    message: "This API key has expired.",
+                  },
+                },
+                { status: 401 },
+              ),
+            ),
+          ),
+        ),
+      ),
+      Effect.provide(NodeServices.layer),
+    );
+    NodeAssert.equal(limits.unavailable?.reason, "probeFailed");
+    NodeAssert.equal(limits.unavailable?.message, "This API key has expired.");
+    NodeAssert.equal(limits.credentialFingerprint, undefined);
+  }),
+);
+
 /**
  * The legacy `OpenCodeProviderLive` Layer + `OpenCodeProvider` service tag
  * are deleted. The snapshot-producing logic they wrapped now lives in the

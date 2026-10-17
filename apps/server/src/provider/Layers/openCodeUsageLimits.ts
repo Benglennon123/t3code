@@ -27,6 +27,10 @@ const UsageWindow = Schema.Struct({
 const UsageResponse = Schema.Struct({
   usage: Schema.Struct({ rolling: UsageWindow, weekly: UsageWindow, monthly: UsageWindow }),
 });
+const ErrorBody = Schema.Struct({
+  error: Schema.Struct({ message: Schema.optionalKey(Schema.String) }),
+});
+const decodeErrorBody = Schema.decodeUnknownOption(Schema.fromJsonString(ErrorBody));
 
 /** External OpenCode servers own their credentials; never read the host's account for them. */
 export const readOpenCodeGoUsageLimits = Effect.fn("readOpenCodeGoUsageLimits")(function* (input: {
@@ -37,6 +41,18 @@ export const readOpenCodeGoUsageLimits = Effect.fn("readOpenCodeGoUsageLimits")(
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const unsupported = makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" });
   if (!input.enabled || input.serverUrl.trim()) return unsupported;
+
+  // A rejected request states why in its body ("This API key has expired…").
+  // That sentence is the only thing telling the user what to fix, so keep it
+  // for the limits notice instead of a generic probe-failed line.
+  const readRejectionMessage = (response: HttpClientResponse.HttpClientResponse) =>
+    response.text.pipe(
+      Effect.map(decodeErrorBody),
+      Effect.orElseSucceed(() => Option.none()),
+      Effect.map((body) =>
+        Option.isSome(body) ? body.value.error.message?.trim().slice(0, 300) : undefined,
+      ),
+    );
 
   return yield* Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -68,9 +84,15 @@ export const readOpenCodeGoUsageLimits = Effect.fn("readOpenCodeGoUsageLimits")(
     );
     // A valid Zen key can exist without a Go subscription.
     if (response.status === 403) return unsupported;
-    const body = yield* HttpClientResponse.filterStatusOk(response).pipe(
-      Effect.flatMap(HttpClientResponse.schemaBodyJson(UsageResponse)),
-    );
+    if (response.status < 200 || response.status >= 300) {
+      const detail = yield* readRejectionMessage(response);
+      return makeUnavailableUsageLimits({
+        checkedAt,
+        reason: "probeFailed",
+        message: detail ?? "OpenCode Go could not read usage.",
+      });
+    }
+    const body = yield* HttpClientResponse.schemaBodyJson(UsageResponse)(response);
     const windows: ServerProviderUsageWindow[] = [
       {
         id: "go_rolling",
