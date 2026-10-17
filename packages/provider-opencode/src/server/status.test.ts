@@ -1,4 +1,5 @@
 import * as NodeAssert from "node:assert/strict";
+import * as NodeSqlite from "node:sqlite";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
@@ -95,6 +96,73 @@ it.effect("reads Go limits with the instance's XDG credentials and preserves res
       ],
     );
   }),
+);
+
+it.effect("reads Go limits with a Console API key and falls back to the Go key", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const resetsAt = "2026-09-17T12:00:00.000Z";
+    const window = { percent: 1, resetsAt };
+    const consoleKey = { type: "key", key: "console-key" };
+    for (const { consoleRow, active = 1, consoleStatus = 200, requested } of [
+      // OpenCode serves Go through a connected Console key, so it wins over
+      // a stale Go key.
+      { consoleRow: consoleKey, requested: ["console-key"] },
+      // A rejected Console key, or one without Go, falls back to the Go key.
+      { consoleRow: consoleKey, consoleStatus: 401, requested: ["console-key", "go-key"] },
+      { consoleRow: consoleKey, consoleStatus: 403, requested: ["console-key", "go-key"] },
+      // OpenCode does not use an inactive key or a Console OAuth login, and a
+      // self-hosted Console's key cannot read opencode.ai's Go usage.
+      { consoleRow: consoleKey, active: 0, requested: ["go-key"] },
+      { consoleRow: { type: "oauth", access: "console-token" }, requested: ["go-key"] },
+      {
+        consoleRow: { ...consoleKey, metadata: { server: "https://console.example" } },
+        requested: ["go-key"],
+      },
+    ]) {
+      const dataHome = yield* fs.makeTempDirectoryScoped();
+      yield* fs.makeDirectory(`${dataHome}/opencode`);
+      yield* fs.writeFileString(
+        `${dataHome}/opencode/auth.json`,
+        JSON.stringify({ "opencode-go": { type: "api", key: "go-key" } }),
+      );
+      const database = new NodeSqlite.DatabaseSync(`${dataHome}/opencode/opencode.db`);
+      database.exec(
+        "CREATE TABLE credential (integration_id text, value text, active integer, time_updated integer)",
+      );
+      const insert = database.prepare("INSERT INTO credential VALUES (?, ?, ?, ?)");
+      insert.run("opencode", JSON.stringify(consoleRow), active, 1);
+      database.close();
+
+      const authorizations: string[] = [];
+      const limits = yield* readOpenCodeGoUsageLimits({
+        enabled: true,
+        serverUrl: "",
+        environment: { XDG_DATA_HOME: dataHome },
+      }).pipe(
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make((request) => {
+            const authorization = request.headers.authorization ?? "";
+            authorizations.push(authorization.replace("Bearer ", ""));
+            const status = authorization === "Bearer console-key" ? consoleStatus : 200;
+            return Effect.succeed(
+              HttpClientResponse.fromWeb(
+                request,
+                Response.json(
+                  { usage: { rolling: window, weekly: window, monthly: window } },
+                  { status },
+                ),
+              ),
+            );
+          }),
+        ),
+      );
+      NodeAssert.deepEqual(authorizations, requested);
+      NodeAssert.equal(limits.unavailable, undefined);
+      NodeAssert.equal(limits.windows.length, 3);
+    }
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 it.effect("does not read local credentials for external or disabled OpenCode instances", () =>

@@ -1,3 +1,5 @@
+import * as NodeSqlite from "node:sqlite";
+
 import type { ServerProviderUsageWindow } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -22,6 +24,15 @@ const AuthFile = Schema.Struct({ "opencode-go": Schema.optionalKey(Schema.Unknow
 const ApiAuth = Schema.Struct({ type: Schema.Literal("api"), key: Schema.String });
 const decodeAuthFile = Schema.decodeEffect(Schema.fromJsonString(AuthFile));
 const decodeApiAuth = Schema.decodeUnknownOption(ApiAuth);
+// OpenCode 2's database tags a stored key "key"; auth.json tags it "api".
+const StoredKey = Schema.Struct({
+  type: Schema.Literal("key"),
+  key: Schema.String,
+  metadata: Schema.optionalKey(
+    Schema.NullOr(Schema.Struct({ server: Schema.optionalKey(Schema.Unknown) })),
+  ),
+});
+const decodeStoredKey = Schema.decodeOption(Schema.fromJsonString(StoredKey));
 const UsageWindow = Schema.Struct({
   percent: Schema.Finite,
   resetsAt: Schema.DateTimeUtcFromString,
@@ -29,6 +40,33 @@ const UsageWindow = Schema.Struct({
 const UsageResponse = Schema.Struct({
   usage: Schema.Struct({ rolling: UsageWindow, weekly: UsageWindow, monthly: UsageWindow }),
 });
+
+/**
+ * OpenCode 2 stores credentials in its SQLite database, and serves Go through
+ * the connected Console's API key. A Console OAuth login has no key, and a
+ * self-hosted Console's key cannot read opencode.ai's Go usage. Rows with a
+ * NULL `active` predate the flag and stay eligible, behind any explicitly
+ * active row.
+ */
+const readConsoleApiKey = (databasePath: string) =>
+  Effect.try(() => {
+    const database = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
+    try {
+      database.exec("PRAGMA busy_timeout = 100");
+      const row = database
+        .prepare(
+          "SELECT value FROM credential WHERE integration_id = 'opencode' AND active IS NOT 0 ORDER BY active IS NOT NULL DESC, time_updated DESC LIMIT 1",
+        )
+        .get();
+      const stored =
+        typeof row?.value === "string"
+          ? Option.getOrUndefined(decodeStoredKey(row.value))
+          : undefined;
+      return stored?.metadata?.server === undefined ? stored?.key.trim() : undefined;
+    } finally {
+      database.close();
+    }
+  }).pipe(Effect.orElseSucceed(() => undefined));
 
 /** External OpenCode servers own their credentials; never read the host's account for them. */
 export const readOpenCodeGoUsageLimits = Effect.fn("readOpenCodeGoUsageLimits")(function* (input: {
@@ -63,15 +101,28 @@ export const readOpenCodeGoUsageLimits = Effect.fn("readOpenCodeGoUsageLimits")(
     const auth = yield* decodeAuthFile(contents);
     const apiAuth = decodeApiAuth(auth["opencode-go"]);
     // OpenCode overlays stored API credentials after environment credentials.
-    const apiKey = (Option.isSome(apiAuth) ? apiAuth.value.key : env.OPENCODE_API_KEY)?.trim();
+    const goKey = (Option.isSome(apiAuth) ? apiAuth.value.key : env.OPENCODE_API_KEY)?.trim();
+    // OpenCode uses a connected Console key for Go over a separate Go key, so
+    // try it first. Fall back to the Go key when the Console key is rejected or
+    // has no Go subscription. Inline auth content is an explicit override.
+    const consoleKey = env.OPENCODE_AUTH_CONTENT
+      ? undefined
+      : yield* readConsoleApiKey(path.join(dataHome, "opencode", "opencode.db"));
+    let apiKey = consoleKey || goKey;
     if (!apiKey) return unsupported;
 
     const client = yield* HttpClient.HttpClient;
-    const response = yield* client.execute(
-      HttpClientRequest.get("https://opencode.ai/zen/go/v1/usage").pipe(
-        HttpClientRequest.bearerToken(apiKey),
-      ),
-    );
+    const readUsage = (key: string) =>
+      client.execute(
+        HttpClientRequest.get("https://opencode.ai/zen/go/v1/usage").pipe(
+          HttpClientRequest.bearerToken(key),
+        ),
+      );
+    let response = yield* readUsage(apiKey);
+    if ((response.status === 401 || response.status === 403) && goKey && goKey !== apiKey) {
+      apiKey = goKey;
+      response = yield* readUsage(apiKey);
+    }
     // A valid Zen key can exist without a Go subscription.
     if (response.status === 403) return unsupported;
     const body = yield* HttpClientResponse.filterStatusOk(response).pipe(
