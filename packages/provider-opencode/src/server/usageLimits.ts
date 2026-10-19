@@ -41,13 +41,8 @@ const UsageResponse = Schema.Struct({
   usage: Schema.Struct({ rolling: UsageWindow, weekly: UsageWindow, monthly: UsageWindow }),
 });
 
-/**
- * OpenCode 2 stores credentials in its SQLite database, and serves Go through
- * the connected Console's API key. A Console OAuth login has no key, and a
- * self-hosted Console's key cannot read opencode.ai's Go usage. Rows with a
- * NULL `active` predate the flag and stay eligible, behind any explicitly
- * active row.
- */
+// Select before decoding so an OAuth or self-hosted connection cannot fall
+// through to another stored account. NULL-active rows predate the selection flag.
 const readConsoleApiKey = (databasePath: string) =>
   Effect.try(() => {
     const database = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
@@ -55,14 +50,22 @@ const readConsoleApiKey = (databasePath: string) =>
       database.exec("PRAGMA busy_timeout = 100");
       const row = database
         .prepare(
-          "SELECT value FROM credential WHERE integration_id = 'opencode' AND active IS NOT 0 ORDER BY active IS NOT NULL DESC, time_updated DESC LIMIT 1",
+          `SELECT value FROM credential
+           WHERE integration_id = 'opencode' AND active IS NOT 0
+           ORDER BY active DESC, time_created DESC, id DESC LIMIT 1`,
         )
         .get();
       const stored =
         typeof row?.value === "string"
           ? Option.getOrUndefined(decodeStoredKey(row.value))
           : undefined;
-      return stored?.metadata?.server === undefined ? stored?.key.trim() : undefined;
+      const server = stored?.metadata?.server;
+      if (typeof server === "string") {
+        const url = new URL(server);
+        if (`${url.origin}${url.pathname.replace(/\/+$/, "")}` !== "https://opencode.ai/console")
+          return undefined;
+      }
+      return stored?.key.trim();
     } finally {
       database.close();
     }
@@ -102,9 +105,8 @@ export const readOpenCodeGoUsageLimits = Effect.fn("readOpenCodeGoUsageLimits")(
     const apiAuth = decodeApiAuth(auth["opencode-go"]);
     // OpenCode overlays stored API credentials after environment credentials.
     const goKey = (Option.isSome(apiAuth) ? apiAuth.value.key : env.OPENCODE_API_KEY)?.trim();
-    // OpenCode uses a connected Console key for Go over a separate Go key, so
-    // try it first. Fall back to the Go key when the Console key is rejected or
-    // has no Go subscription. Inline auth content is an explicit override.
+    // Console supplies Go credentials in OpenCode 2. Inline auth explicitly
+    // overrides local credentials, including the Console connection.
     const consoleKey = env.OPENCODE_AUTH_CONTENT
       ? undefined
       : yield* readConsoleApiKey(path.join(dataHome, "opencode", "opencode.db"));
