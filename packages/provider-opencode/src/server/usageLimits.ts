@@ -107,9 +107,11 @@ export const readOpenCodeGoUsageLimits = Effect.fn("readOpenCodeGoUsageLimits")(
     const goKey = (Option.isSome(apiAuth) ? apiAuth.value.key : env.OPENCODE_API_KEY)?.trim();
     // Console supplies Go credentials in OpenCode 2. Inline auth explicitly
     // overrides local credentials, including the Console connection.
-    const consoleKey = env.OPENCODE_AUTH_CONTENT
-      ? undefined
-      : yield* readConsoleApiKey(path.join(dataHome, "opencode", "opencode.db"));
+    const databaseFile = env.OPENCODE_DB ?? "opencode.db";
+    const consoleKey =
+      env.OPENCODE_AUTH_CONTENT || databaseFile === ":memory:"
+        ? undefined
+        : yield* readConsoleApiKey(path.resolve(dataHome, "opencode", databaseFile));
     let apiKey = consoleKey || goKey;
     if (!apiKey) return unsupported;
 

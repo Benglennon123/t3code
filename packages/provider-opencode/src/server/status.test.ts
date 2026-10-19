@@ -130,6 +130,7 @@ it.effect(
         active = 1,
         consoleStatus = 200,
         inline = false,
+        databaseFile,
         requested,
       } of [
         {
@@ -155,6 +156,8 @@ it.effect(
           requested: ["go-key"],
         },
         { inline: true, requested: ["inline-key"] },
+        { databaseFile: "selected.db", requested: ["console-key"] },
+        { databaseFile: ":memory:", requested: ["go-key"] },
         { active: null, requested: ["console-key"] },
       ]) {
         database.exec("DELETE FROM credential");
@@ -169,6 +172,15 @@ it.effect(
           9,
         );
         insert.run("cred_other", "other", JSON.stringify(consoleKey), 1, 10, 10);
+        if (databaseFile === "selected.db") {
+          yield* fs.writeFile(
+            `${dataHome}/opencode/selected.db`,
+            yield* fs.readFile(`${dataHome}/opencode/opencode.db`),
+          );
+          database
+            .prepare("UPDATE credential SET value = ? WHERE id = 'cred_selected'")
+            .run(JSON.stringify({ type: "key", key: "old-key" }));
+        }
         const before = yield* fs.readFile(`${dataHome}/opencode/opencode.db`);
         const authorizations: string[] = [];
         const limits = yield* readOpenCodeGoUsageLimits({
@@ -176,6 +188,7 @@ it.effect(
           serverUrl: "",
           environment: {
             XDG_DATA_HOME: dataHome,
+            ...(databaseFile !== undefined ? { OPENCODE_DB: databaseFile } : {}),
             ...(inline
               ? { OPENCODE_AUTH_CONTENT: '{"opencode-go":{"type":"api","key":"inline-key"}}' }
               : {}),
