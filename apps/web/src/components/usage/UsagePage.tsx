@@ -83,6 +83,7 @@ import {
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { UsageLimitsSection } from "./UsageLimits";
 import { UsageStorageSection, worktreeStorageQuery } from "./UsageStorage";
+import { figureClass, Metric } from "./UsageMetric";
 import { UsagePriceOverrides } from "./UsagePriceOverrides";
 import { UsageProviderChart } from "./UsageProviderChart";
 import { SpeedPremium, UsageModelDialog } from "./UsageModelDialog";
@@ -1245,31 +1246,6 @@ function ProviderMark({
       displayName={presentation.label}
       iconClassName={className}
     />
-  );
-}
-
-function figureClass(loading: boolean) {
-  return cn("transition-opacity", loading && "opacity-40 delay-150");
-}
-
-function Metric({
-  label,
-  value,
-  loading,
-}: {
-  readonly label: string;
-  readonly value: string;
-  readonly loading: boolean;
-}) {
-  return (
-    <div className="flex min-w-0 flex-col gap-0.5">
-      <span className="text-xs text-muted-foreground">{label}</span>
-      <span
-        className={cn("text-base font-medium text-foreground tabular-nums", figureClass(loading))}
-      >
-        {value}
-      </span>
-    </div>
   );
 }
 
