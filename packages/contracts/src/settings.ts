@@ -1207,6 +1207,29 @@ export const StorageCleanupReport = Schema.Struct({
 });
 export type StorageCleanupReport = typeof StorageCleanupReport.Type;
 
+export const WorktreeStorageEntry = Schema.Struct({
+  path: Schema.String,
+  projectPath: Schema.NullOr(Schema.String),
+  threadId: Schema.NullOr(ThreadId),
+  threadTitle: Schema.NullOr(Schema.String),
+  /** Space removal would free; null when the walk timed out or failed. */
+  bytes: Schema.NullOr(Schema.Number),
+});
+export type WorktreeStorageEntry = typeof WorktreeStorageEntry.Type;
+export const WorktreeStorageVolume = Schema.Struct({
+  path: Schema.String,
+  totalBytes: Schema.Number,
+  freeBytes: Schema.Number,
+});
+export type WorktreeStorageVolume = typeof WorktreeStorageVolume.Type;
+export const WorktreeStorage = Schema.Struct({
+  measuredAt: Schema.String,
+  worktrees: Schema.Array(WorktreeStorageEntry),
+  volume: Schema.NullOr(WorktreeStorageVolume),
+  worktreeCleanupEnabled: Schema.Boolean,
+});
+export type WorktreeStorage = typeof WorktreeStorage.Type;
+
 export const StorageCleanupSettings = Schema.Struct({
   worktreeKeepWhen: WorktreeKeepWhen.pipe(
     Schema.withDecodingDefault(Effect.succeed("uncommitted-changes")),

@@ -82,6 +82,7 @@ import {
 } from "../WorkspaceBreadcrumb";
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { UsageLimitsSection } from "./UsageLimits";
+import { UsageStorageSection, worktreeStorageQuery } from "./UsageStorage";
 import { UsagePriceOverrides } from "./UsagePriceOverrides";
 import { UsageProviderChart } from "./UsageProviderChart";
 import { SpeedPremium, UsageModelDialog } from "./UsageModelDialog";
@@ -195,6 +196,9 @@ export function UsagePage() {
   }));
   const metric = preferences.metric;
   const showingLimits = metric === "limits";
+  const showingStorage = metric === "storage";
+  // Limits and storage are current snapshots, so they have no period.
+  const showingCurrent = showingLimits || showingStorage;
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [limitsNow, setLimitsNow] = useState(() => Date.now());
   const refreshingRef = useRef(false);
@@ -215,12 +219,21 @@ export function UsagePage() {
   const merged = shown?.merged ?? answeredUsage;
   const shownWindow = shown?.window ?? window;
   const shownHourly = shownWindow.resolution === "hour";
-  const refreshingUsage = isRefreshing && !showingLimits;
+  const refreshingUsage = isRefreshing && !showingCurrent;
   const showingKept = shown !== null && shown.window !== window;
   const presentations = useAtomValue(environmentPresentations.presentationsAtom);
   const presentationsWithProviders = useAtomValue(
     environmentPresentations.presentationsWithProvidersAtom,
   );
+  const storageEnvironments = selectedEnvironments.map((environment) => ({
+    environmentId: environment.environmentId,
+    label: environment.label,
+    supported:
+      presentations.get(environment.environmentId)?.serverConfig?.environment.capabilities
+        .worktreeStorage === true,
+  }));
+  const shownNoun = showingLimits ? "limits" : showingStorage ? "storage" : "usage";
+  const refreshLabel = `Refresh ${shownNoun}`;
   const cursorAccessEnvironments = hiddenProviders.has("cursor")
     ? []
     : cursorKeychainAccessEnvironments(selectedEnvironments);
@@ -287,7 +300,7 @@ export function UsagePage() {
     event.preventDefault();
     event.stopPropagation();
     if (metricOption) selectMetric(metricOption.value);
-    if (periodOption && !showingLimits) selectWindow(periodOption.days);
+    if (periodOption && !showingCurrent) selectWindow(periodOption.days);
   });
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- window capture keydown listener for usage metric and period shortcuts
@@ -299,6 +312,13 @@ export function UsagePage() {
   const refreshWindow = () => {
     if (refreshingRef.current) return;
 
+    if (showingStorage) {
+      for (const environment of storageEnvironments) {
+        if (environment.supported)
+          appAtomRegistry.refresh(worktreeStorageQuery(environment.environmentId));
+      }
+      return;
+    }
     if (showingLimits) {
       refreshingRef.current = true;
       setIsRefreshing(true);
@@ -372,7 +392,7 @@ export function UsagePage() {
             selectedEnvironments={selectedEnvironments}
             selectedEnvironmentIds={selectedEnvironmentIds}
             onSelectionChange={setSelectedEnvironmentIds}
-            showUsageStatus={!showingLimits}
+            showUsageStatus={!showingCurrent}
             refreshing={refreshingUsage}
             isPartial={isPartial}
             duplicateSources={merged.duplicateSources}
@@ -388,7 +408,7 @@ export function UsagePage() {
           />
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
-      {!showingLimits ? (
+      {!showingCurrent ? (
         <span className="hidden min-w-0 truncate text-xs text-muted-foreground @7xl/usage-header:block">
           {windowLabel}
         </span>
@@ -396,7 +416,7 @@ export function UsagePage() {
       <div className="ms-auto hidden shrink-0 items-center justify-end gap-2 @4xl/usage-header:flex">
         {/* Limits are always current, so they have no period. The period sits before the metric
             tabs so dropping it never moves them. */}
-        {showingLimits ? null : (
+        {showingCurrent ? null : (
           <ToggleGroup
             aria-label="Usage period"
             variant="segmented"
@@ -430,9 +450,9 @@ export function UsagePage() {
         </ToggleGroup>
         <Button
           onClick={refreshWindow}
-          aria-label={showingLimits ? "Refresh limits" : "Refresh usage"}
+          aria-label={refreshLabel}
           aria-busy={isRefreshing}
-          disabled={isRefreshing || (!showingLimits && !canReadDiagnostics)}
+          disabled={isRefreshing || (!showingCurrent && !canReadDiagnostics)}
           size="icon-sm"
           variant="ghost"
         >
@@ -440,7 +460,7 @@ export function UsagePage() {
         </Button>
       </div>
       <div className="ms-auto flex shrink-0 items-center justify-end gap-1 @4xl/usage-header:hidden">
-        {showingLimits ? null : (
+        {showingCurrent ? null : (
           <Select value={String(windowDays)} onValueChange={(value) => selectWindow(Number(value))}>
             <SelectTrigger
               aria-label="Usage period"
@@ -491,9 +511,9 @@ export function UsagePage() {
         </Select>
         <Button
           onClick={refreshWindow}
-          aria-label={showingLimits ? "Refresh limits" : "Refresh usage"}
+          aria-label={refreshLabel}
           aria-busy={isRefreshing}
-          disabled={isRefreshing || (!showingLimits && !canReadDiagnostics)}
+          disabled={isRefreshing || (!showingCurrent && !canReadDiagnostics)}
           size="icon-sm"
           variant="ghost"
         >
@@ -516,9 +536,11 @@ export function UsagePage() {
             {selectedEnvironments.length === 0 ? (
               <p className="text-sm text-muted-foreground">
                 {environments.length === 0
-                  ? `Connect an environment to see ${showingLimits ? "limits" : "usage"}.`
-                  : `Select an environment to see ${showingLimits ? "limits" : "usage"}.`}
+                  ? `Connect an environment to see ${shownNoun}.`
+                  : `Select an environment to see ${shownNoun}.`}
               </p>
+            ) : showingStorage ? (
+              <UsageStorageSection environments={storageEnvironments} />
             ) : showingLimits ? (
               <UsageLimitsSection
                 selectedEnvironmentIds={selectedEnvironmentIds}
@@ -571,7 +593,7 @@ export function UsagePage() {
           </WorkspacePageContainer>
         </ScrollArea>
       </div>
-      {showingLimits ? null : (
+      {showingCurrent ? null : (
         <UsageModelDialogHost
           models={merged.models}
           environments={selectedEnvironments}

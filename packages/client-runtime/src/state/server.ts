@@ -1171,6 +1171,12 @@ export function createServerEnvironmentAtoms<R, E>(
       tag: WS_METHODS.serverPrepareTriage,
       concurrency: { mode: "singleFlight", key: ({ environmentId }) => environmentId },
     }),
+    // Walking every worktree takes seconds, so reopening the tab reuses the last measurement.
+    worktreeStorage: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:worktree-storage",
+      tag: WS_METHODS.serverGetWorktreeStorage,
+      staleTimeMs: 5 * 60_000,
+    }),
     databaseStorage,
     databaseCompactionRecommendations,
     storageCleanupReport: createEnvironmentRpcSubscriptionAtomFamily(runtime, {

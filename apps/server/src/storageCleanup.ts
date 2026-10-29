@@ -3,6 +3,8 @@ import {
   OrchestrationV2AppThreadJson,
   OrchestrationV2ProviderSessionJson,
 } from "@t3tools/contracts";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect FileSystem has no statfs.
+import * as NodeFSP from "node:fs/promises";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import type {
@@ -14,6 +16,7 @@ import type {
   WorktreeCleanupRules,
   StorageCleanupReport,
   StorageCleanupReportEntry,
+  WorktreeStorage,
 } from "@t3tools/contracts";
 import { resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
@@ -200,6 +203,7 @@ export class StorageCleanup extends Context.Service<
     readonly runNow: Effect.Effect<StorageCleanupReport, ServerSettingsError>;
     readonly latestReport: Effect.Effect<StorageCleanupReport | null>;
     readonly reports: Stream.Stream<StorageCleanupReport | null>;
+    readonly worktreeStorage: Effect.Effect<WorktreeStorage, ServerSettingsError>;
     readonly drain: Effect.Effect<void>;
   }
 >()("t3/storageCleanup") {}
@@ -349,6 +353,25 @@ const make = Effect.gen(function* () {
         return true;
     }
     return false;
+  });
+
+  const managedRoots = Effect.fn("StorageCleanup.managedRoots")(function* (
+    serverSettings: ServerSettings,
+  ) {
+    const roots: Array<string> = [];
+    for (const directory of managedWorktreesDirectories(
+      serverSettings,
+      config.worktreesDir,
+      path,
+      yield* HostProcess.HomeDirectory,
+    )) {
+      const root = yield* fs.exists(directory).pipe(
+        Effect.flatMap((exists) => (exists ? fs.realPath(directory) : Effect.succeed(null))),
+        Effect.orElseSucceed(() => null),
+      );
+      if (root !== null && !isFilesystemRoot(root, path)) roots.push(root);
+    }
+    return roots;
   });
 
   const reportOrphanWorktrees = Effect.fn("StorageCleanup.reportOrphanWorktrees")(function* (
@@ -709,19 +732,7 @@ const make = Effect.gen(function* () {
       return { waiting: false, kept: [] };
     let waiting = false;
     const kept: string[] = [];
-    const roots: Array<string> = [];
-    for (const directory of managedWorktreesDirectories(
-      serverSettings,
-      config.worktreesDir,
-      path,
-      yield* HostProcess.HomeDirectory,
-    )) {
-      const root = yield* fs.exists(directory).pipe(
-        Effect.flatMap((exists) => (exists ? fs.realPath(directory) : Effect.succeed(null))),
-        Effect.orElseSucceed(() => null),
-      );
-      if (root !== null && !isFilesystemRoot(root, path)) roots.push(root);
-    }
+    const roots = yield* managedRoots(serverSettings);
     const deletedRows = yield* sql<{ payload_json: string; workspaceRoot: string }>`
           SELECT t.payload_json, p.workspace_root AS "workspaceRoot"
           FROM orchestration_v2_projection_threads t
@@ -1237,6 +1248,70 @@ const make = Effect.gen(function* () {
   const requestSweep = Ref.getAndSet(automaticSweepQueued, true).pipe(
     Effect.flatMap((queued) => (queued ? Effect.void : worker.enqueue(undefined))),
   );
+  const worktreeStorage = Effect.fn("StorageCleanup.worktreeStorage")(function* () {
+    const serverSettings = yield* settingsService.getSettings;
+    const roots = yield* managedRoots(serverSettings);
+    const snapshot = yield* readThreads().pipe(Effect.orDie);
+    const groups = Map.groupBy(
+      snapshot.threads.filter((thread) => thread.worktreePath !== null),
+      (thread) => path.resolve(thread.worktreePath!),
+    );
+    const owned = yield* Effect.forEach(
+      groups,
+      ([worktreePath, group]) =>
+        Effect.gen(function* () {
+          if (!(yield* fs.exists(worktreePath))) return [];
+          // A thread working in the project checkout itself has no worktree to count.
+          if (yield* containsProjectRoot(worktreePath, snapshot.projects)) return [];
+          const thread = worktreeOwner(group) ?? group[0]!;
+          return [
+            {
+              path: worktreePath,
+              projectPath:
+                snapshot.projects.find((project) => project.id === thread.projectId)
+                  ?.workspaceRoot ?? null,
+              threadId: thread.id,
+              threadTitle: thread.title,
+              bytes: yield* measureWorktree(worktreePath),
+            },
+          ];
+        }).pipe(Effect.orElseSucceed(() => [])),
+      { concurrency: 4 },
+    );
+    const orphans: StorageCleanupReportEntry[] = [];
+    yield* reportOrphanWorktrees(roots, snapshot.projects, orphans).pipe(Effect.orDie);
+    const volumePath = roots[0] ?? config.worktreesDir;
+    const volume = yield* Effect.tryPromise(() => NodeFSP.statfs(volumePath)).pipe(
+      Effect.map((stats) => ({
+        path: volumePath,
+        totalBytes: stats.blocks * stats.bsize,
+        freeBytes: stats.bavail * stats.bsize,
+      })),
+      Effect.orElseSucceed(() => null),
+    );
+    return {
+      measuredAt: DateTime.formatIso(yield* DateTime.now),
+      worktrees: [
+        ...owned.flat(),
+        ...orphans.flatMap((entry) =>
+          entry.path === null
+            ? []
+            : [
+                {
+                  path: entry.path,
+                  projectPath: null,
+                  threadId: null,
+                  threadTitle: null,
+                  bytes: entry.bytes,
+                },
+              ],
+        ),
+      ],
+      volume,
+      worktreeCleanupEnabled: anyWorktreePolicy(serverSettings, worktreeCleanupEnabled),
+    } satisfies WorktreeStorage;
+  });
+
   const runNow = Effect.gen(function* () {
     const completion = yield* Deferred.make<StorageCleanupReport, ServerSettingsError>();
     yield* worker.enqueue(completion);
@@ -1313,6 +1388,7 @@ const make = Effect.gen(function* () {
     runNow,
     latestReport: SubscriptionRef.get(reportRef),
     reports: SubscriptionRef.changes(reportRef),
+    worktreeStorage: worktreeStorage(),
     drain: worker.drain,
   });
 });
