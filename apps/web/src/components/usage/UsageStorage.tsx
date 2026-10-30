@@ -379,7 +379,7 @@ function CleanupRow({
       ) : (
         <span>
           Cleanup rules are off.{" "}
-          <Link to="/settings/storage" className="text-foreground hover:underline">
+          <Link to="/settings/worktrees" className="text-foreground hover:underline">
             Set up
           </Link>
         </span>
