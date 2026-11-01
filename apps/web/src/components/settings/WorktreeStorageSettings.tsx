@@ -1,22 +1,17 @@
-import type { EnvironmentId, WorktreeStorage, WorktreeStorageEntry } from "@t3tools/contracts";
+import type { EnvironmentId, WorktreeStorage } from "@t3tools/contracts";
 import { formatPercent } from "@t3tools/shared/usageFormat";
 import { useAtomValue } from "@effect/atom-react";
-import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { formatBytes } from "../../lib/formatBytes";
-import { useProjects } from "../../state/entities";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
 import { RefreshIcon } from "../ui/refresh-icon";
-import { Skeleton } from "../ui/skeleton";
 import { toastManager } from "../ui/toast";
-import { UsageShareBar } from "../usage/UsageShareBar";
-import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { useSettingsScope } from "./SettingsScopeContext";
-import { SettingsRow, SettingsSection } from "./settingsLayout";
+import { SettingsRow } from "./settingsLayout";
 import { settingsScopeEnvironmentLabel } from "./settingsScopeAxis";
 
 const WORKTREE_COLOR = "var(--primary)";
@@ -32,8 +27,8 @@ function worktreeStorageQuery(environmentId: EnvironmentId) {
   return serverEnvironment.worktreeStorage({ environmentId, input: {} });
 }
 
-/** Read-only disk usage for the selected machines' worktrees. */
-export function WorktreeStorageSection() {
+/** Space taken by worktrees on each selected machine, shown atop the Cleanup rules. */
+export function WorktreeStorageRows() {
   const { connectedEnvironments } = useSettingsScope();
   const machines = connectedEnvironments
     .filter(
@@ -43,21 +38,16 @@ export function WorktreeStorageSection() {
       environmentId: environment.environmentId,
       label: settingsScopeEnvironmentLabel(environment, connectedEnvironments),
     }));
-  if (machines.length === 0) return null;
-  return (
-    <>
-      {machines.map((machine) => (
-        <MachineStorage
-          key={machine.environmentId}
-          machine={machine}
-          showLabel={machines.length > 1}
-        />
-      ))}
-    </>
-  );
+  return machines.map((machine) => (
+    <MachineStorageRow
+      key={machine.environmentId}
+      machine={machine}
+      showLabel={machines.length > 1}
+    />
+  ));
 }
 
-function MachineStorage({
+function MachineStorageRow({
   machine,
   showLabel,
 }: {
@@ -66,13 +56,38 @@ function MachineStorage({
 }) {
   const query = useEnvironmentQuery(worktreeStorageQuery(machine.environmentId));
   const storage = query.data;
-  const title = showLabel ? `Disk usage on ${machine.label}` : "Disk usage";
+  const title = showLabel
+    ? `Space used by worktrees on ${machine.label}`
+    : "Space used by worktrees";
+  const totalBytes = storage?.worktrees.reduce((sum, entry) => sum + (entry.bytes ?? 0), 0) ?? 0;
+  const count = storage?.worktrees.length ?? 0;
+  const unmeasured = storage?.worktrees.filter((entry) => entry.bytes === null).length ?? 0;
+  const volume = storage?.volume ?? null;
   return (
-    <>
-      <SettingsSection
-        id={`worktree-storage-${machine.environmentId}`}
-        title={title}
-        headerAction={
+    <SettingsRow
+      title={
+        <span className="flex items-baseline gap-2">
+          {title}
+          {storage === null ? null : (
+            <span className="text-muted-foreground tabular-nums">{formatBytes(totalBytes)}</span>
+          )}
+        </span>
+      }
+      description={
+        storage === null
+          ? (query.error ?? "Measuring…")
+          : [
+              `${count} ${count === 1 ? "worktree" : "worktrees"}`,
+              volume === null
+                ? null
+                : `${formatPercent(totalBytes / volume.totalBytes)} of the ${formatBytes(volume.totalBytes)} disk, ${formatBytes(volume.freeBytes)} free`,
+              unmeasured > 0 ? `${unmeasured} not measured` : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")
+      }
+      control={
+        <div className="flex items-center gap-1.5">
           <Button
             size="icon-xs"
             variant="ghost"
@@ -83,86 +98,37 @@ function MachineStorage({
           >
             <RefreshIcon size="sm" refreshing={query.isPending} />
           </Button>
-        }
-      >
-        {storage === null ? (
-          query.error ? (
-            <SettingsRow title="Couldn't measure worktrees" description={query.error} />
-          ) : (
-            <div className="flex flex-col gap-3 px-3 py-3 sm:px-4" aria-busy>
-              <Skeleton className="h-5 w-48" />
-              <Skeleton className="h-2 w-full" />
-            </div>
-          )
-        ) : (
-          <StorageSummary machine={machine} storage={storage} onCleaned={query.refresh} />
-        )}
-      </SettingsSection>
-      {storage !== null && storage.worktrees.length > 0 ? (
-        <FoldedSettingsSection
-          id={`worktree-storage-list-${machine.environmentId}`}
-          title="Largest worktrees"
-          headerPlacement="inside"
-          summary={`${storage.worktrees.length} ${storage.worktrees.length === 1 ? "worktree" : "worktrees"}`}
-        >
-          {storage.worktrees
-            .toSorted((left, right) => (right.bytes ?? -1) - (left.bytes ?? -1))
-            .map((entry) => (
-              <WorktreeRow key={entry.path} environmentId={machine.environmentId} entry={entry} />
-            ))}
-        </FoldedSettingsSection>
-      ) : null}
-    </>
+          {storage === null ? null : (
+            <CleanupButton machine={machine} storage={storage} onCleaned={query.refresh} />
+          )}
+        </div>
+      }
+    >
+      {volume === null ? null : <DiskBar worktreeBytes={totalBytes} volume={volume} />}
+    </SettingsRow>
   );
 }
 
-function StorageSummary({
-  machine,
-  storage,
-  onCleaned,
+function DiskBar({
+  worktreeBytes,
+  volume,
 }: {
-  readonly machine: StorageMachine;
-  readonly storage: WorktreeStorage;
-  readonly onCleaned: () => void;
+  readonly worktreeBytes: number;
+  readonly volume: NonNullable<WorktreeStorage["volume"]>;
 }) {
-  const totalBytes = storage.worktrees.reduce((sum, entry) => sum + (entry.bytes ?? 0), 0);
-  const unmeasured = storage.worktrees.filter((entry) => entry.bytes === null).length;
-  const volume = storage.volume;
+  const used = volume.totalBytes - volume.freeBytes;
+  const share = (bytes: number) => `${(Math.max(0, bytes) / volume.totalBytes) * 100}%`;
   return (
-    <>
-      <SettingsRow
-        title={`${formatBytes(totalBytes)} in ${storage.worktrees.length} ${storage.worktrees.length === 1 ? "worktree" : "worktrees"}`}
-        description={[
-          volume === null
-            ? "Disk capacity is unavailable."
-            : `${formatPercent(totalBytes / volume.totalBytes)} of this machine's ${formatBytes(volume.totalBytes)} disk. ${formatBytes(volume.freeBytes)} free.`,
-          unmeasured > 0 ? `${unmeasured} couldn't be measured.` : null,
-          storage.worktreeCleanupEnabled
-            ? "Cleanup keeps worktrees with changes or open terminals."
-            : "Turn on a cleanup rule below to clean up from here.",
-        ]
-          .filter(Boolean)
-          .join(" ")}
-        control={<CleanupButton machine={machine} storage={storage} onCleaned={onCleaned} />}
+    <div
+      className="mt-2.5 mb-2 flex h-1.5 w-full overflow-hidden rounded-full"
+      style={{ background: FREE_COLOR }}
+    >
+      <div
+        className="min-w-0.5"
+        style={{ width: share(worktreeBytes), background: WORKTREE_COLOR }}
       />
-      {volume === null ? null : (
-        <div className="px-3 pt-1 pb-4 sm:px-4">
-          <UsageShareBar
-            label="Disk"
-            format={formatBytes}
-            segments={[
-              { label: "Worktrees", value: totalBytes, color: WORKTREE_COLOR },
-              {
-                label: "Everything else",
-                value: Math.max(0, volume.totalBytes - volume.freeBytes - totalBytes),
-                color: OTHER_COLOR,
-              },
-              { label: "Free", value: volume.freeBytes, color: FREE_COLOR },
-            ]}
-          />
-        </div>
-      )}
-    </>
+      <div style={{ width: share(used - worktreeBytes), background: OTHER_COLOR }} />
+    </div>
   );
 }
 
@@ -202,44 +168,5 @@ function CleanupButton({
     >
       {pending ? "Cleaning up…" : "Clean up now"}
     </Button>
-  );
-}
-
-function WorktreeRow({
-  environmentId,
-  entry,
-}: {
-  readonly environmentId: EnvironmentId;
-  readonly entry: WorktreeStorageEntry;
-}) {
-  const folder = entry.path.split(/[\\/]/).findLast((part) => part.length > 0) ?? entry.path;
-  const projects = useProjects();
-  const project =
-    projects.find(
-      (candidate) =>
-        candidate.environmentId === environmentId && candidate.workspaceRoot === entry.projectPath,
-    )?.title ?? entry.projectPath?.split(/[\\/]/).findLast((part) => part.length > 0);
-  return (
-    <SettingsRow
-      title={
-        entry.threadId === null ? (
-          <span className="wrap-anywhere">{folder}</span>
-        ) : (
-          <Link
-            to="/$environmentId/$threadId"
-            params={{ environmentId, threadId: entry.threadId }}
-            className="wrap-anywhere hover:underline"
-          >
-            {entry.threadTitle ?? folder}
-          </Link>
-        )
-      }
-      description={entry.threadId === null ? "No thread uses this folder" : project}
-      control={
-        <span className="text-xs text-muted-foreground tabular-nums">
-          {entry.bytes === null ? "Not measured" : formatBytes(entry.bytes)}
-        </span>
-      }
-    />
   );
 }

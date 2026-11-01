@@ -14,7 +14,6 @@ import {
 import { searchableSetting } from "./settingsSearch";
 import { WorktreeCleanupSection, WorktreesDirectoryRow } from "./StorageSettings";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
-import { WorktreeStorageSection } from "./WorktreeStorageSettings";
 
 function StartFromRemoteRow() {
   const settings = useScopedSettings();
@@ -58,7 +57,6 @@ export function WorktreesSettingsPanel() {
 
   return (
     <SettingsPageContainer>
-      {!isProjectScope && <WorktreeStorageSection />}
       <SettingsSection id="worktree-creation" title="Creation">
         {!isProjectScope && <WorktreesDirectoryRow />}
         <StartFromRemoteRow />

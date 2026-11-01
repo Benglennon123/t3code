@@ -33,6 +33,7 @@ import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayo
 import { DatabaseStorageNotice } from "./DatabaseStorageNotice";
 import { AdvancedSettings } from "./AdvancedSettings";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
+import { WorktreeStorageRows } from "./WorktreeStorageSettings";
 import { SettingsScopeNotice } from "./SettingsScopeNotice";
 import { SettingsGroup } from "./SettingsGroup";
 import type { ScopedSettingsTarget } from "./scopedSettings";
@@ -507,6 +508,7 @@ export function WorktreeCleanupSection() {
   return (
     <SettingsSection id="storage-worktrees" title="Cleanup">
       <>
+        {!isProjectScope && <WorktreeStorageRows />}
         {isProjectScope && (
           <SettingsRow
             title="Automatic worktree cleanup"
